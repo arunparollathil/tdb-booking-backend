@@ -22,6 +22,11 @@ import lombok.Setter;
 @Schema(description = "Payload for booking tickets on a darshan slot")
 public class DarshanBookingRequestDto {
 
+    @Schema(
+            description = "Unique client-generated idempotency key for safe retries",
+            example = "123e4567-e89b-12d3-a456-426614174000")
+    private UUID idempotencyKey;
+
     @NotNull(message = "Darshan slot ID is mandatory") @Schema(
             description = "Unique identifier of the darshan slot to book",
             example = "33333333-3333-3333-3333-333333333333",

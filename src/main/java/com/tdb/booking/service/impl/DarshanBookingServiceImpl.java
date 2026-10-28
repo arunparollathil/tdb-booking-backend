@@ -6,26 +6,26 @@ import com.tdb.booking.entity.BookingStatus;
 import com.tdb.booking.entity.DarshanBooking;
 import com.tdb.booking.entity.DarshanSlot;
 import com.tdb.booking.exception.CancellationNotAllowedException;
-import com.tdb.booking.exception.InsufficientCapacityException;
 import com.tdb.booking.exception.InvalidRequestException;
 import com.tdb.booking.exception.ResourceNotFoundException;
-import com.tdb.booking.exception.SlotInactiveException;
 import com.tdb.booking.mapper.DarshanBookingMapper;
 import com.tdb.booking.repository.DarshanBookingRepository;
 import com.tdb.booking.repository.DarshanSlotRepository;
 import com.tdb.booking.service.DarshanBookingService;
 import java.time.LocalDateTime;
+import java.util.Optional;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Implementation of {@link DarshanBookingService}. Executes ticket reservations and cancellations
- * using pessimistic database row locking (LockModeType.PESSIMISTIC_WRITE) to guarantee that
- * capacity limits and slot schedules are strictly enforced, even under heavy concurrent requests.
+ * using pessimistic database row locking (LockModeType.PESSIMISTIC_WRITE) and safe idempotency key
+ * retries.
  */
 @Service
 @RequiredArgsConstructor
@@ -36,16 +36,16 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
     private final DarshanSlotRepository darshanSlotRepository;
     private final DarshanBookingRepository darshanBookingRepository;
     private final DarshanBookingMapper darshanBookingMapper;
-    private final com.tdb.booking.service.ReceiptNumberService receiptNumberService;
+    private final BookingTransactionExecutor bookingTransactionExecutor;
 
     /**
-     * Confirms ticket reservation for a darshan slot using pessimistic database row locking.
+     * Confirms ticket reservation for a darshan slot using pessimistic database row locking and
+     * safe idempotency retries.
      *
      * @param requestDto booking request details
      * @return confirmed {@link DarshanBookingResponseDto}
      */
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public DarshanBookingResponseDto createBooking(DarshanBookingRequestDto requestDto) {
         // Step 1: Validate the request and ensure ticketCount > 0
         if (requestDto == null) {
@@ -58,84 +58,54 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
             throw new InvalidRequestException("Ticket count must be greater than zero");
         }
 
+        // Auto-assign idempotency key if not supplied by client (ensuring backward compatibility)
+        if (requestDto.getIdempotencyKey() == null) {
+            requestDto.setIdempotencyKey(UUID.randomUUID());
+        }
+
         log.info(
-                "Attempting booking for slotId: {}, devotee: {}, tickets: {}",
+                "Attempting booking for slotId: {}, key: {}, devotee: {}, tickets: {}",
                 requestDto.getDarshanSlotId(),
+                requestDto.getIdempotencyKey(),
                 requestDto.getDevoteeName(),
                 requestDto.getTicketCount());
 
-        // Step 2 & 3: Retrieve and lock the darshan slot using findByIdForUpdate() (SELECT ... FOR
-        // UPDATE)
-        DarshanSlot slot =
-                darshanSlotRepository
-                        .findByIdForUpdate(requestDto.getDarshanSlotId())
-                        .orElseThrow(
-                                () ->
-                                        ResourceNotFoundException.slotNotFound(
-                                                requestDto.getDarshanSlotId()));
-
-        // Step 4 & 5: Reject inactive slots using existing error-handling conventions
-        if (!Boolean.TRUE.equals(slot.getIsActive())) {
-            throw SlotInactiveException.slotInactive(slot.getId());
-        }
-
-        // Step 6: Calculate available ticket count while holding the lock
-        int availableTickets = slot.getAvailableCount();
-
-        // Step 7: If the requested tickets exceed availability, throw an appropriate business
-        // exception
-        if (requestDto.getTicketCount() > availableTickets) {
+        try {
+            return bookingTransactionExecutor.executeBooking(requestDto);
+        } catch (DataIntegrityViolationException ex) {
             log.warn(
-                    "Insufficient capacity for slotId: {}. Requested: {}, Available: {}",
-                    slot.getId(),
-                    requestDto.getTicketCount(),
-                    availableTickets);
-            throw new InsufficientCapacityException(
-                    String.format(
-                            "Requested tickets (%d) exceed available capacity (%d)",
-                            requestDto.getTicketCount(), availableTickets));
+                    "Database constraint collision on idempotency key: {}. Attempting safe"
+                            + " recovery.",
+                    requestDto.getIdempotencyKey(),
+                    ex);
+            return recoverCommittedBooking(requestDto, ex);
+        }
+    }
+
+    /**
+     * Recovers the already-committed booking when a concurrent unique constraint race condition
+     * occurs. Validates that payload parameters match, and returns the committed booking.
+     *
+     * @param requestDto current booking request
+     * @param originalEx original database constraint violation exception
+     * @return existing {@link DarshanBookingResponseDto}
+     */
+    private DarshanBookingResponseDto recoverCommittedBooking(
+            DarshanBookingRequestDto requestDto, DataIntegrityViolationException originalEx) {
+        Optional<DarshanBooking> existingOpt =
+                darshanBookingRepository.findByIdempotencyKey(requestDto.getIdempotencyKey());
+
+        if (existingOpt.isPresent()) {
+            DarshanBooking existing = existingOpt.get();
+            BookingTransactionExecutor.validateMatchingBooking(existing, requestDto);
+            log.info(
+                    "Successfully recovered committed booking {} for idempotency key {}",
+                    existing.getId(),
+                    requestDto.getIdempotencyKey());
+            return darshanBookingMapper.toResponseDto(existing, "CONFIRMED");
         }
 
-        // Step 8: Increment booked_count by the requested ticket count (JPA dirty checking /
-        // managed entity)
-        slot.setBookedCount(slot.getBookedCount() + requestDto.getTicketCount());
-        darshanSlotRepository.save(slot);
-
-        // Step 9: Generate unique, concurrent-safe receipt number in format
-        // TEMPLE_CODE/FINANCIAL_YEAR/SEQUENCE
-        String receiptNumber = receiptNumberService.generateReceiptNumber(slot.getTemple());
-
-        // Step 10: Create and persist the DarshanBooking record with audit fields, CONFIRMED
-        // status,
-        // and receipt number
-        DarshanBooking booking =
-                DarshanBooking.builder()
-                        .darshanSlot(slot)
-                        .receiptNumber(receiptNumber)
-                        .devoteeName(
-                                requestDto.getDevoteeName() != null
-                                        ? requestDto.getDevoteeName().trim()
-                                        : "")
-                        .phoneNumber(
-                                requestDto.getPhoneNumber() != null
-                                        ? requestDto.getPhoneNumber().trim()
-                                        : "")
-                        .ticketCount(requestDto.getTicketCount())
-                        .bookingStatus(BookingStatus.CONFIRMED)
-                        .createdBy(UUID.randomUUID())
-                        .build();
-
-        DarshanBooking savedBooking = darshanBookingRepository.save(booking);
-
-        log.info(
-                "Booking successful. BookingId: {}, Receipt: {}, New BookedCount: {}/{}",
-                savedBooking.getId(),
-                savedBooking.getReceiptNumber(),
-                slot.getBookedCount(),
-                slot.getCapacity());
-
-        // Step 11 & 12: Return the confirmed booking response DTO and commit transaction
-        return darshanBookingMapper.toResponseDto(savedBooking, "CONFIRMED");
+        throw originalEx;
     }
 
     /**

@@ -10,6 +10,10 @@ import org.springframework.stereotype.Repository;
 @Repository
 public interface DarshanBookingRepository extends JpaRepository<DarshanBooking, UUID> {
 
+    Optional<DarshanBooking> findByIdempotencyKey(UUID idempotencyKey);
+
+    boolean existsByIdempotencyKey(UUID idempotencyKey);
+
     Optional<DarshanBooking> findByReceiptNumber(String receiptNumber);
 
     boolean existsByReceiptNumber(String receiptNumber);

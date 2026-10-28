@@ -94,11 +94,13 @@ class RepositoryIntegrationTests {
                 darshanSlotRepository.findBySlotMasterIdAndSlotDate(savedSlot.getId(), visitDate);
         assertThat(fetchedDarshanSlot).isPresent();
 
-        // 4. DarshanBooking with receiptNumber
+        // 4. DarshanBooking with receiptNumber and idempotencyKey
         UUID devoteeUserId = UUID.randomUUID();
+        UUID idempotencyKey = UUID.randomUUID();
         DarshanBooking booking =
                 DarshanBooking.builder()
                         .darshanSlot(savedDarshanSlot)
+                        .idempotencyKey(idempotencyKey)
                         .receiptNumber("TIRUPATI_001/2026-27/000001")
                         .devoteeName("Arun Kumar")
                         .phoneNumber("+919876543210")
@@ -108,6 +110,7 @@ class RepositoryIntegrationTests {
         DarshanBooking savedBooking = darshanBookingRepository.save(booking);
 
         assertThat(savedBooking.getId()).isNotNull();
+        assertThat(savedBooking.getIdempotencyKey()).isEqualTo(idempotencyKey);
         assertThat(savedBooking.getReceiptNumber()).isEqualTo("TIRUPATI_001/2026-27/000001");
         List<DarshanBooking> bookings =
                 darshanBookingRepository.findByDarshanSlotId(savedDarshanSlot.getId());
@@ -118,6 +121,11 @@ class RepositoryIntegrationTests {
         List<DarshanBooking> bookingsByPhone =
                 darshanBookingRepository.findByPhoneNumber("+919876543210");
         assertThat(bookingsByPhone).hasSize(1);
+
+        Optional<DarshanBooking> bookingByIdempotency =
+                darshanBookingRepository.findByIdempotencyKey(idempotencyKey);
+        assertThat(bookingByIdempotency).isPresent();
+        assertThat(darshanBookingRepository.existsByIdempotencyKey(idempotencyKey)).isTrue();
 
         Optional<DarshanBooking> bookingByReceipt =
                 darshanBookingRepository.findByReceiptNumber("TIRUPATI_001/2026-27/000001");

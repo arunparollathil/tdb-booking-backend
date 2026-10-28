@@ -31,7 +31,10 @@ import lombok.experimental.SuperBuilder;
         uniqueConstraints = {
             @UniqueConstraint(
                     name = "uk_darshan_booking_receipt_number",
-                    columnNames = {"receipt_number"})
+                    columnNames = {"receipt_number"}),
+            @UniqueConstraint(
+                    name = "uk_darshan_booking_idempotency_key",
+                    columnNames = {"idempotency_key"})
         })
 @Getter
 @Setter
@@ -44,6 +47,9 @@ public class DarshanBooking extends BaseAuditEntity {
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", updatable = false, nullable = false)
     private UUID id;
+
+    @Column(name = "idempotency_key", nullable = false, unique = true)
+    private UUID idempotencyKey;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "darshan_slot_id", nullable = false)

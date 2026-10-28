@@ -25,6 +25,11 @@ public class DarshanBookingResponseDto {
     private UUID bookingId;
 
     @Schema(
+            description = "Unique client-generated idempotency key associated with this booking",
+            example = "123e4567-e89b-12d3-a456-426614174000")
+    private UUID idempotencyKey;
+
+    @Schema(
             description = "Unique identifier of the booked darshan slot",
             example = "33333333-3333-3333-3333-333333333333")
     private UUID darshanSlotId;
