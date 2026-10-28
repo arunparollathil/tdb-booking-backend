@@ -2,6 +2,8 @@ package com.tdb.booking.entity;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
@@ -12,11 +14,16 @@ import jakarta.persistence.Table;
 import java.util.Objects;
 import java.util.UUID;
 import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.experimental.SuperBuilder;
 
+/**
+ * JPA Entity representing a confirmed or cancelled darshan ticket booking. Maps to the {@code
+ * darshan_booking} table.
+ */
 @Entity
 @Table(name = "darshan_booking")
 @Getter
@@ -43,6 +50,11 @@ public class DarshanBooking extends BaseAuditEntity {
 
     @Column(name = "ticket_count", nullable = false)
     private Integer ticketCount;
+
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(name = "booking_status", nullable = false, length = 20)
+    private BookingStatus bookingStatus = BookingStatus.CONFIRMED;
 
     @Override
     public boolean equals(Object o) {

@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.tdb.booking.dto.DarshanBookingRequestDto;
+import com.tdb.booking.dto.DarshanBookingResponseDto;
+import com.tdb.booking.entity.BookingStatus;
+import com.tdb.booking.entity.DarshanBooking;
 import com.tdb.booking.entity.DarshanSlot;
 import com.tdb.booking.entity.SlotMaster;
 import com.tdb.booking.entity.TempleMaster;
@@ -230,5 +233,122 @@ class DarshanBookingConcurrencyTest {
                 darshanSlotRepository.findById(darshanSlot.getId()).orElseThrow();
         assertThat(unalteredSlot.getBookedCount()).isEqualTo(0);
         assertThat(unalteredSlot.getAvailableCount()).isEqualTo(10);
+    }
+
+    @Test
+    @DisplayName(
+            "P4: Concurrent cancellation of multiple bookings correctly releases all reserved"
+                    + " tickets")
+    void concurrentCancellations_ShouldCorrectlyReleaseAllTickets() throws InterruptedException {
+        int numberOfBookings = 5;
+        java.util.List<UUID> bookingIds = new java.util.ArrayList<>();
+
+        // Create 5 bookings of 2 tickets each (total 10 tickets booked, filling the slot)
+        for (int i = 0; i < numberOfBookings; i++) {
+            DarshanBookingResponseDto response =
+                    darshanBookingService.createBooking(
+                            DarshanBookingRequestDto.builder()
+                                    .darshanSlotId(darshanSlot.getId())
+                                    .devoteeName("Devotee " + i)
+                                    .phoneNumber("9876543210")
+                                    .ticketCount(2)
+                                    .build());
+            bookingIds.add(response.getBookingId());
+        }
+
+        DarshanSlot fullyBookedSlot =
+                darshanSlotRepository.findById(darshanSlot.getId()).orElseThrow();
+        assertThat(fullyBookedSlot.getBookedCount()).isEqualTo(10);
+        assertThat(fullyBookedSlot.getAvailableCount()).isEqualTo(0);
+
+        // Cancel all 5 bookings concurrently
+        ExecutorService executorService = Executors.newFixedThreadPool(numberOfBookings);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch endLatch = new CountDownLatch(numberOfBookings);
+        AtomicInteger successCount = new AtomicInteger(0);
+
+        for (UUID bookingId : bookingIds) {
+            executorService.submit(
+                    () -> {
+                        try {
+                            startLatch.await();
+                            darshanBookingService.cancelBooking(bookingId);
+                            successCount.incrementAndGet();
+                        } catch (Exception ignored) {
+                        } finally {
+                            endLatch.countDown();
+                        }
+                    });
+        }
+
+        startLatch.countDown();
+        endLatch.await();
+        executorService.shutdown();
+
+        assertThat(successCount.get()).isEqualTo(numberOfBookings);
+
+        DarshanSlot releasedSlot =
+                darshanSlotRepository.findById(darshanSlot.getId()).orElseThrow();
+        assertThat(releasedSlot.getBookedCount()).isEqualTo(0);
+        assertThat(releasedSlot.getAvailableCount()).isEqualTo(10);
+
+        for (UUID bookingId : bookingIds) {
+            DarshanBooking booking = darshanBookingRepository.findById(bookingId).orElseThrow();
+            assertThat(booking.getBookingStatus()).isEqualTo(BookingStatus.CANCELLED);
+        }
+    }
+
+    @Test
+    @DisplayName(
+            "P4: Concurrent duplicate cancellations of the same booking are idempotent and release"
+                    + " tickets exactly once")
+    void concurrentDuplicateCancellations_ShouldBeIdempotentAndReleaseTicketsOnce()
+            throws InterruptedException {
+        // Create 1 booking of 3 tickets
+        DarshanBookingResponseDto response =
+                darshanBookingService.createBooking(
+                        DarshanBookingRequestDto.builder()
+                                .darshanSlotId(darshanSlot.getId())
+                                .devoteeName("Devotee Single")
+                                .phoneNumber("9876543210")
+                                .ticketCount(3)
+                                .build());
+        UUID targetBookingId = response.getBookingId();
+
+        int numberOfThreads = 10;
+        ExecutorService executorService = Executors.newFixedThreadPool(numberOfThreads);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch endLatch = new CountDownLatch(numberOfThreads);
+        AtomicInteger successCount = new AtomicInteger(0);
+
+        for (int i = 0; i < numberOfThreads; i++) {
+            executorService.submit(
+                    () -> {
+                        try {
+                            startLatch.await();
+                            darshanBookingService.cancelBooking(targetBookingId);
+                            successCount.incrementAndGet();
+                        } catch (Exception ignored) {
+                        } finally {
+                            endLatch.countDown();
+                        }
+                    });
+        }
+
+        startLatch.countDown();
+        endLatch.await();
+        executorService.shutdown();
+
+        // All threads should succeed (either primary cancel or idempotent return)
+        assertThat(successCount.get()).isEqualTo(numberOfThreads);
+
+        DarshanSlot finalSlot = darshanSlotRepository.findById(darshanSlot.getId()).orElseThrow();
+        // Booked count was 3, after cancel should be 0 (NOT decremented 10 times below zero)
+        assertThat(finalSlot.getBookedCount()).isEqualTo(0);
+        assertThat(finalSlot.getAvailableCount()).isEqualTo(10);
+
+        DarshanBooking cancelledBooking =
+                darshanBookingRepository.findById(targetBookingId).orElseThrow();
+        assertThat(cancelledBooking.getBookingStatus()).isEqualTo(BookingStatus.CANCELLED);
     }
 }

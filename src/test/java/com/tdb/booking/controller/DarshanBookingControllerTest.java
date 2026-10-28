@@ -1,13 +1,17 @@
 package com.tdb.booking.controller;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.tdb.booking.dto.DarshanBookingRequestDto;
+import com.tdb.booking.entity.BookingStatus;
+import com.tdb.booking.entity.DarshanBooking;
 import com.tdb.booking.entity.DarshanSlot;
 import com.tdb.booking.entity.SlotMaster;
 import com.tdb.booking.entity.TempleMaster;
@@ -46,6 +50,8 @@ class DarshanBookingControllerTest {
 
     @Autowired private DarshanBookingRepository darshanBookingRepository;
 
+    private TempleMaster temple;
+    private SlotMaster slotMaster1;
     private DarshanSlot activeSlot;
     private DarshanSlot limitedSlot;
     private DarshanSlot inactiveSlot;
@@ -57,7 +63,7 @@ class DarshanBookingControllerTest {
         slotMasterRepository.deleteAll();
         templeMasterRepository.deleteAll();
 
-        TempleMaster temple =
+        temple =
                 templeMasterRepository.save(
                         TempleMaster.builder()
                                 .templeCode("TIR_001")
@@ -66,7 +72,7 @@ class DarshanBookingControllerTest {
                                 .createdBy(UUID.randomUUID())
                                 .build());
 
-        SlotMaster slotMaster1 =
+        slotMaster1 =
                 slotMasterRepository.save(
                         SlotMaster.builder()
                                 .temple(temple)
@@ -356,5 +362,168 @@ class DarshanBookingControllerTest {
         mockMvc.perform(get("/api/v1/darshan-bookings/{bookingId}", "not-a-uuid"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.errorCode", is("INVALID_REQUEST")));
+    }
+
+    @Test
+    @DisplayName(
+            "PATCH /api/v1/darshan-bookings/{bookingId}/cancel - Confirmed booking, slot not"
+                    + " started -> Cancels and releases tickets")
+    void cancelBooking_Success_ReleasesTickets() throws Exception {
+        DarshanBookingRequestDto request =
+                DarshanBookingRequestDto.builder()
+                        .darshanSlotId(activeSlot.getId())
+                        .devoteeName("Arun")
+                        .phoneNumber("9876543210")
+                        .ticketCount(3)
+                        .build();
+
+        String responseJson =
+                mockMvc.perform(
+                                post("/api/v1/darshan-bookings")
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content(objectMapper.writeValueAsString(request)))
+                        .andExpect(status().isCreated())
+                        .andReturn()
+                        .getResponse()
+                        .getContentAsString();
+
+        String bookingIdStr = objectMapper.readTree(responseJson).get("bookingId").asText();
+        UUID bookingId = UUID.fromString(bookingIdStr);
+
+        // Pre-cancellation check: slot capacity reflects 3 booked tickets
+        DarshanSlot slotBefore = darshanSlotRepository.findById(activeSlot.getId()).orElseThrow();
+        assertThat(slotBefore.getBookedCount()).isEqualTo(3);
+        assertThat(slotBefore.getAvailableCount()).isEqualTo(7);
+
+        // Perform cancellation
+        mockMvc.perform(patch("/api/v1/darshan-bookings/{bookingId}/cancel", bookingId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bookingId", is(bookingIdStr)))
+                .andExpect(jsonPath("$.bookingStatus", is("CANCELLED")))
+                .andExpect(jsonPath("$.ticketCount", is(3)));
+
+        // Post-cancellation check: slot bookedCount decreased back to 0, availableCount is 10
+        DarshanSlot slotAfter = darshanSlotRepository.findById(activeSlot.getId()).orElseThrow();
+        assertThat(slotAfter.getBookedCount()).isEqualTo(0);
+        assertThat(slotAfter.getAvailableCount()).isEqualTo(10);
+
+        // Booking record in repository is marked CANCELLED
+        DarshanBooking cancelledBooking =
+                darshanBookingRepository.findById(bookingId).orElseThrow();
+        assertThat(cancelledBooking.getBookingStatus()).isEqualTo(BookingStatus.CANCELLED);
+    }
+
+    @Test
+    @DisplayName(
+            "PATCH /api/v1/darshan-bookings/{bookingId}/cancel - Booking already cancelled ->"
+                + " Idempotent, returns existing cancelled booking without releasing tickets again")
+    void cancelBooking_AlreadyCancelled_Idempotent() throws Exception {
+        DarshanBookingRequestDto request =
+                DarshanBookingRequestDto.builder()
+                        .darshanSlotId(activeSlot.getId())
+                        .devoteeName("Devotee Idempotent")
+                        .phoneNumber("9876543210")
+                        .ticketCount(4)
+                        .build();
+
+        String responseJson =
+                mockMvc.perform(
+                                post("/api/v1/darshan-bookings")
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content(objectMapper.writeValueAsString(request)))
+                        .andExpect(status().isCreated())
+                        .andReturn()
+                        .getResponse()
+                        .getContentAsString();
+
+        String bookingIdStr = objectMapper.readTree(responseJson).get("bookingId").asText();
+        UUID bookingId = UUID.fromString(bookingIdStr);
+
+        // First cancellation -> cancels and releases 4 tickets
+        mockMvc.perform(patch("/api/v1/darshan-bookings/{bookingId}/cancel", bookingId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bookingStatus", is("CANCELLED")));
+
+        DarshanSlot slotAfterFirstCancel =
+                darshanSlotRepository.findById(activeSlot.getId()).orElseThrow();
+        assertThat(slotAfterFirstCancel.getBookedCount()).isEqualTo(0);
+        assertThat(slotAfterFirstCancel.getAvailableCount()).isEqualTo(10);
+
+        // Second cancellation -> idempotent return, does not double-decrement or release tickets
+        // again
+        mockMvc.perform(patch("/api/v1/darshan-bookings/{bookingId}/cancel", bookingId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bookingId", is(bookingIdStr)))
+                .andExpect(jsonPath("$.bookingStatus", is("CANCELLED")));
+
+        DarshanSlot slotAfterSecondCancel =
+                darshanSlotRepository.findById(activeSlot.getId()).orElseThrow();
+        assertThat(slotAfterSecondCancel.getBookedCount()).isEqualTo(0);
+        assertThat(slotAfterSecondCancel.getAvailableCount()).isEqualTo(10);
+    }
+
+    @Test
+    @DisplayName(
+            "PATCH /api/v1/darshan-bookings/{bookingId}/cancel - Slot has already started ->"
+                    + " Rejects cancellation with 409 Conflict")
+    void cancelBooking_SlotAlreadyStarted_RejectsWith409() throws Exception {
+        // Create past slot (started yesterday)
+        DarshanSlot pastSlot =
+                darshanSlotRepository.save(
+                        DarshanSlot.builder()
+                                .temple(temple)
+                                .slotMaster(slotMaster1)
+                                .slotDate(LocalDate.now().minusDays(1))
+                                .capacity(10)
+                                .bookedCount(2)
+                                .isActive(true)
+                                .createdBy(UUID.randomUUID())
+                                .build());
+
+        DarshanBooking pastBooking =
+                darshanBookingRepository.save(
+                        DarshanBooking.builder()
+                                .darshanSlot(pastSlot)
+                                .devoteeName("Devotee Past")
+                                .phoneNumber("9876543210")
+                                .ticketCount(2)
+                                .bookingStatus(BookingStatus.CONFIRMED)
+                                .createdBy(UUID.randomUUID())
+                                .build());
+
+        mockMvc.perform(patch("/api/v1/darshan-bookings/{bookingId}/cancel", pastBooking.getId()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.errorCode", is("SLOT_ALREADY_STARTED")))
+                .andExpect(jsonPath("$.status", is(409)));
+
+        // Verify booking remains CONFIRMED and slot bookedCount remains unchanged
+        DarshanBooking unalteredBooking =
+                darshanBookingRepository.findById(pastBooking.getId()).orElseThrow();
+        assertThat(unalteredBooking.getBookingStatus()).isEqualTo(BookingStatus.CONFIRMED);
+
+        DarshanSlot unalteredSlot = darshanSlotRepository.findById(pastSlot.getId()).orElseThrow();
+        assertThat(unalteredSlot.getBookedCount()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName(
+            "PATCH /api/v1/darshan-bookings/{bookingId}/cancel - Nonexistent booking ID -> Returns"
+                    + " 404 Not Found")
+    void cancelBooking_NotFound_Returns404() throws Exception {
+        mockMvc.perform(patch("/api/v1/darshan-bookings/{bookingId}/cancel", UUID.randomUUID()))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.errorCode", is("BOOKING_NOT_FOUND")))
+                .andExpect(jsonPath("$.status", is(404)));
+    }
+
+    @Test
+    @DisplayName(
+            "PATCH /api/v1/darshan-bookings/{bookingId}/cancel - Invalid UUID string -> Returns 400"
+                    + " Bad Request")
+    void cancelBooking_InvalidUUID_Returns400() throws Exception {
+        mockMvc.perform(patch("/api/v1/darshan-bookings/{bookingId}/cancel", "invalid-uuid"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errorCode", is("INVALID_REQUEST")))
+                .andExpect(jsonPath("$.status", is(400)));
     }
 }

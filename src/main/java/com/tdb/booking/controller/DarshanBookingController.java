@@ -17,6 +17,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -24,15 +25,17 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * REST Controller for managing Darshan ticket bookings. Handles ticket reservation with concurrency
- * control and booking lookup.
+ * REST Controller for managing Darshan ticket bookings. Handles ticket reservation, booking lookup,
+ * and booking cancellations.
  */
 @RestController
 @RequestMapping("/api/v1/darshan-bookings")
 @RequiredArgsConstructor
 @Tag(
         name = "Darshan Bookings",
-        description = "Endpoints for booking tickets and retrieving reservation details")
+        description =
+                "Endpoints for booking tickets, retrieving reservation details, and cancelling"
+                        + " bookings")
 public class DarshanBookingController {
 
     private final DarshanBookingService darshanBookingService;
@@ -144,6 +147,67 @@ public class DarshanBookingController {
                     @PathVariable
                     UUID bookingId) {
         DarshanBookingResponseDto response = darshanBookingService.getBookingById(bookingId);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Cancels an existing booking using its booking ID and releases its reserved tickets back to
+     * the slot.
+     *
+     * @param bookingId unique identifier of the booking
+     * @return {@link DarshanBookingResponseDto} with updated CANCELLED status
+     */
+    @PatchMapping("/{bookingId}/cancel")
+    @Operation(
+            summary = "Cancel a booking",
+            description =
+                    "Cancels a confirmed booking and releases reserved tickets back to the darshan"
+                        + " slot. Always acquires a pessimistic write lock on the slot before"
+                        + " modifying state. Idempotent: if already cancelled, returns the existing"
+                        + " record without modifying capacity. Rejects cancellation with 409"
+                        + " Conflict if the slot has already started.")
+    @ApiResponses(
+            value = {
+                @ApiResponse(
+                        responseCode = "200",
+                        description = "Booking successfully cancelled (or already cancelled)",
+                        content =
+                                @Content(
+                                        schema =
+                                                @Schema(
+                                                        implementation =
+                                                                DarshanBookingResponseDto.class))),
+                @ApiResponse(
+                        responseCode = "400",
+                        description = "Invalid UUID format supplied",
+                        content =
+                                @Content(
+                                        schema = @Schema(implementation = ApiErrorResponse.class))),
+                @ApiResponse(
+                        responseCode = "404",
+                        description = "Booking reference not found",
+                        content =
+                                @Content(
+                                        schema = @Schema(implementation = ApiErrorResponse.class))),
+                @ApiResponse(
+                        responseCode = "409",
+                        description = "Darshan slot has already started; cancellation rejected",
+                        content =
+                                @Content(
+                                        schema = @Schema(implementation = ApiErrorResponse.class))),
+                @ApiResponse(
+                        responseCode = "500",
+                        description = "Unexpected internal server error",
+                        content =
+                                @Content(schema = @Schema(implementation = ApiErrorResponse.class)))
+            })
+    public ResponseEntity<DarshanBookingResponseDto> cancelBooking(
+            @Parameter(
+                            description = "UUID of the booking reference to cancel",
+                            example = "44444444-4444-4444-4444-444444444444")
+                    @PathVariable
+                    UUID bookingId) {
+        DarshanBookingResponseDto response = darshanBookingService.cancelBooking(bookingId);
         return ResponseEntity.ok(response);
     }
 }
