@@ -29,6 +29,11 @@ public class DarshanBookingResponseDto {
             example = "33333333-3333-3333-3333-333333333333")
     private UUID darshanSlotId;
 
+    @Schema(
+            description = "Unique receipt number formatted as TEMPLE_CODE/FINANCIAL_YEAR/SEQUENCE",
+            example = "SBM/2026-27/000123")
+    private String receiptNumber;
+
     @Schema(description = "Name of the devotee", example = "Arun")
     private String devoteeName;
 

@@ -11,6 +11,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import java.util.Objects;
 import java.util.UUID;
 import lombok.AllArgsConstructor;
@@ -25,7 +26,13 @@ import lombok.experimental.SuperBuilder;
  * darshan_booking} table.
  */
 @Entity
-@Table(name = "darshan_booking")
+@Table(
+        name = "darshan_booking",
+        uniqueConstraints = {
+            @UniqueConstraint(
+                    name = "uk_darshan_booking_receipt_number",
+                    columnNames = {"receipt_number"})
+        })
 @Getter
 @Setter
 @NoArgsConstructor
@@ -41,6 +48,9 @@ public class DarshanBooking extends BaseAuditEntity {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "darshan_slot_id", nullable = false)
     private DarshanSlot darshanSlot;
+
+    @Column(name = "receipt_number", nullable = false, unique = true, length = 50)
+    private String receiptNumber;
 
     @Column(name = "devotee_name", nullable = false, length = 150)
     private String devoteeName;
