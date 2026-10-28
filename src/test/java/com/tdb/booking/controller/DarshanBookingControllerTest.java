@@ -19,6 +19,7 @@ import com.tdb.booking.repository.DarshanBookingRepository;
 import com.tdb.booking.repository.DarshanSlotRepository;
 import com.tdb.booking.repository.SlotMasterRepository;
 import com.tdb.booking.repository.TempleMasterRepository;
+import com.tdb.booking.repository.TempleReceiptSequenceRepository;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.UUID;
@@ -50,6 +51,8 @@ class DarshanBookingControllerTest {
 
     @Autowired private DarshanBookingRepository darshanBookingRepository;
 
+    @Autowired private TempleReceiptSequenceRepository templeReceiptSequenceRepository;
+
     private TempleMaster temple;
     private SlotMaster slotMaster1;
     private DarshanSlot activeSlot;
@@ -61,6 +64,7 @@ class DarshanBookingControllerTest {
         darshanBookingRepository.deleteAll();
         darshanSlotRepository.deleteAll();
         slotMasterRepository.deleteAll();
+        templeReceiptSequenceRepository.deleteAll();
         templeMasterRepository.deleteAll();
 
         temple =
@@ -155,6 +159,7 @@ class DarshanBookingControllerTest {
                 .andExpect(jsonPath("$.phoneNumber", is("9876543210")))
                 .andExpect(jsonPath("$.ticketCount", is(3)))
                 .andExpect(jsonPath("$.bookingStatus", is("CONFIRMED")))
+                .andExpect(jsonPath("$.receiptNumber", notNullValue()))
                 .andExpect(jsonPath("$.createdAt", notNullValue()));
     }
 
@@ -400,6 +405,7 @@ class DarshanBookingControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.bookingId", is(bookingIdStr)))
                 .andExpect(jsonPath("$.bookingStatus", is("CANCELLED")))
+                .andExpect(jsonPath("$.receiptNumber", notNullValue()))
                 .andExpect(jsonPath("$.ticketCount", is(3)));
 
         // Post-cancellation check: slot bookedCount decreased back to 0, availableCount is 10
@@ -484,6 +490,7 @@ class DarshanBookingControllerTest {
                 darshanBookingRepository.save(
                         DarshanBooking.builder()
                                 .darshanSlot(pastSlot)
+                                .receiptNumber("TIR_001/2026-27/000999")
                                 .devoteeName("Devotee Past")
                                 .phoneNumber("9876543210")
                                 .ticketCount(2)

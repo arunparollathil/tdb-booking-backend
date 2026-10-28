@@ -6,6 +6,7 @@ import com.tdb.booking.entity.DarshanBooking;
 import com.tdb.booking.entity.DarshanSlot;
 import com.tdb.booking.entity.SlotMaster;
 import com.tdb.booking.entity.TempleMaster;
+import com.tdb.booking.entity.TempleReceiptSequence;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.List;
@@ -28,6 +29,8 @@ class RepositoryIntegrationTests {
     @Autowired private DarshanSlotRepository darshanSlotRepository;
 
     @Autowired private DarshanBookingRepository darshanBookingRepository;
+
+    @Autowired private TempleReceiptSequenceRepository templeReceiptSequenceRepository;
 
     @Test
     @DisplayName("Should successfully persist and retrieve entities across all 4 tables")
@@ -91,11 +94,12 @@ class RepositoryIntegrationTests {
                 darshanSlotRepository.findBySlotMasterIdAndSlotDate(savedSlot.getId(), visitDate);
         assertThat(fetchedDarshanSlot).isPresent();
 
-        // 4. DarshanBooking
+        // 4. DarshanBooking with receiptNumber
         UUID devoteeUserId = UUID.randomUUID();
         DarshanBooking booking =
                 DarshanBooking.builder()
                         .darshanSlot(savedDarshanSlot)
+                        .receiptNumber("TIRUPATI_001/2026-27/000001")
                         .devoteeName("Arun Kumar")
                         .phoneNumber("+919876543210")
                         .ticketCount(4)
@@ -104,6 +108,7 @@ class RepositoryIntegrationTests {
         DarshanBooking savedBooking = darshanBookingRepository.save(booking);
 
         assertThat(savedBooking.getId()).isNotNull();
+        assertThat(savedBooking.getReceiptNumber()).isEqualTo("TIRUPATI_001/2026-27/000001");
         List<DarshanBooking> bookings =
                 darshanBookingRepository.findByDarshanSlotId(savedDarshanSlot.getId());
         assertThat(bookings).hasSize(1);
@@ -113,5 +118,30 @@ class RepositoryIntegrationTests {
         List<DarshanBooking> bookingsByPhone =
                 darshanBookingRepository.findByPhoneNumber("+919876543210");
         assertThat(bookingsByPhone).hasSize(1);
+
+        Optional<DarshanBooking> bookingByReceipt =
+                darshanBookingRepository.findByReceiptNumber("TIRUPATI_001/2026-27/000001");
+        assertThat(bookingByReceipt).isPresent();
+        assertThat(darshanBookingRepository.existsByReceiptNumber("TIRUPATI_001/2026-27/000001"))
+                .isTrue();
+
+        // 5. TempleReceiptSequence
+        TempleReceiptSequence sequence =
+                TempleReceiptSequence.builder()
+                        .temple(savedTemple)
+                        .financialYear("2026-27")
+                        .lastSequenceNumber(1L)
+                        .createdBy(adminUserId)
+                        .build();
+        TempleReceiptSequence savedSequence = templeReceiptSequenceRepository.save(sequence);
+
+        assertThat(savedSequence.getId()).isNotNull();
+        assertThat(savedSequence.getLastSequenceNumber()).isEqualTo(1L);
+
+        Optional<TempleReceiptSequence> fetchedSequence =
+                templeReceiptSequenceRepository.findByTempleIdAndFinancialYear(
+                        savedTemple.getId(), "2026-27");
+        assertThat(fetchedSequence).isPresent();
+        assertThat(fetchedSequence.get().getLastSequenceNumber()).isEqualTo(1L);
     }
 }

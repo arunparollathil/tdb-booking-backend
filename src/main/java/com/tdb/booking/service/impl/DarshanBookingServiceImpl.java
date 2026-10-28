@@ -36,6 +36,7 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
     private final DarshanSlotRepository darshanSlotRepository;
     private final DarshanBookingRepository darshanBookingRepository;
     private final DarshanBookingMapper darshanBookingMapper;
+    private final com.tdb.booking.service.ReceiptNumberService receiptNumberService;
 
     /**
      * Confirms ticket reservation for a darshan slot using pessimistic database row locking.
@@ -100,11 +101,17 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
         slot.setBookedCount(slot.getBookedCount() + requestDto.getTicketCount());
         darshanSlotRepository.save(slot);
 
-        // Step 9 & 10: Create and persist the DarshanBooking record with audit fields and CONFIRMED
-        // status
+        // Step 9: Generate unique, concurrent-safe receipt number in format
+        // TEMPLE_CODE/FINANCIAL_YEAR/SEQUENCE
+        String receiptNumber = receiptNumberService.generateReceiptNumber(slot.getTemple());
+
+        // Step 10: Create and persist the DarshanBooking record with audit fields, CONFIRMED
+        // status,
+        // and receipt number
         DarshanBooking booking =
                 DarshanBooking.builder()
                         .darshanSlot(slot)
+                        .receiptNumber(receiptNumber)
                         .devoteeName(
                                 requestDto.getDevoteeName() != null
                                         ? requestDto.getDevoteeName().trim()
@@ -121,8 +128,9 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
         DarshanBooking savedBooking = darshanBookingRepository.save(booking);
 
         log.info(
-                "Booking successful. BookingId: {}, New BookedCount: {}/{}",
+                "Booking successful. BookingId: {}, Receipt: {}, New BookedCount: {}/{}",
                 savedBooking.getId(),
+                savedBooking.getReceiptNumber(),
                 slot.getBookedCount(),
                 slot.getCapacity());
 

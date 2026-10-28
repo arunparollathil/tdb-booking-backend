@@ -10,12 +10,14 @@ import com.tdb.booking.entity.DarshanBooking;
 import com.tdb.booking.entity.DarshanSlot;
 import com.tdb.booking.entity.SlotMaster;
 import com.tdb.booking.entity.TempleMaster;
+import com.tdb.booking.entity.TempleReceiptSequence;
 import com.tdb.booking.exception.InsufficientCapacityException;
 import com.tdb.booking.exception.InvalidRequestException;
 import com.tdb.booking.repository.DarshanBookingRepository;
 import com.tdb.booking.repository.DarshanSlotRepository;
 import com.tdb.booking.repository.SlotMasterRepository;
 import com.tdb.booking.repository.TempleMasterRepository;
+import com.tdb.booking.repository.TempleReceiptSequenceRepository;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.Optional;
@@ -41,6 +43,8 @@ class DarshanBookingConcurrencyTest {
 
     @Autowired private DarshanBookingService darshanBookingService;
 
+    @Autowired private ReceiptNumberService receiptNumberService;
+
     @Autowired private DarshanSlotRepository darshanSlotRepository;
 
     @Autowired private DarshanBookingRepository darshanBookingRepository;
@@ -49,6 +53,9 @@ class DarshanBookingConcurrencyTest {
 
     @Autowired private TempleMasterRepository templeMasterRepository;
 
+    @Autowired private TempleReceiptSequenceRepository templeReceiptSequenceRepository;
+
+    private TempleMaster temple;
     private DarshanSlot darshanSlot;
 
     @BeforeEach
@@ -56,9 +63,10 @@ class DarshanBookingConcurrencyTest {
         darshanBookingRepository.deleteAll();
         darshanSlotRepository.deleteAll();
         slotMasterRepository.deleteAll();
+        templeReceiptSequenceRepository.deleteAll();
         templeMasterRepository.deleteAll();
 
-        TempleMaster temple =
+        temple =
                 templeMasterRepository.save(
                         TempleMaster.builder()
                                 .templeCode(
@@ -350,5 +358,172 @@ class DarshanBookingConcurrencyTest {
         DarshanBooking cancelledBooking =
                 darshanBookingRepository.findById(targetBookingId).orElseThrow();
         assertThat(cancelledBooking.getBookingStatus()).isEqualTo(BookingStatus.CANCELLED);
+    }
+
+    @Test
+    @DisplayName(
+            "P5: Concurrent bookings do not generate duplicate receipt numbers and maintain"
+                    + " strictly sequential numbering")
+    void concurrentBookings_ShouldGenerateUniqueReceiptNumbers() throws InterruptedException {
+        int numberOfThreads = 10;
+        ExecutorService executorService = Executors.newFixedThreadPool(numberOfThreads);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch endLatch = new CountDownLatch(numberOfThreads);
+        java.util.Set<String> generatedReceipts =
+                java.util.concurrent.ConcurrentHashMap.newKeySet();
+        AtomicInteger successCount = new AtomicInteger(0);
+
+        for (int i = 0; i < numberOfThreads; i++) {
+            final int index = i;
+            executorService.submit(
+                    () -> {
+                        try {
+                            startLatch.await();
+                            DarshanBookingResponseDto response =
+                                    darshanBookingService.createBooking(
+                                            DarshanBookingRequestDto.builder()
+                                                    .darshanSlotId(darshanSlot.getId())
+                                                    .devoteeName("Devotee " + index)
+                                                    .phoneNumber("9876543210")
+                                                    .ticketCount(1)
+                                                    .build());
+                            if (response.getReceiptNumber() != null) {
+                                generatedReceipts.add(response.getReceiptNumber());
+                                successCount.incrementAndGet();
+                            }
+                        } catch (Exception ignored) {
+                        } finally {
+                            endLatch.countDown();
+                        }
+                    });
+        }
+
+        startLatch.countDown();
+        endLatch.await();
+        executorService.shutdown();
+
+        assertThat(successCount.get()).isEqualTo(numberOfThreads);
+        // Every concurrent booking must have received a distinct, unique receipt number
+        assertThat(generatedReceipts).hasSize(numberOfThreads);
+
+        String currentFy = receiptNumberService.calculateFinancialYear(LocalDate.now());
+        String expectedPrefix = temple.getTempleCode() + "/" + currentFy + "/";
+
+        for (String receipt : generatedReceipts) {
+            assertThat(receipt).startsWith(expectedPrefix);
+        }
+
+        // Sequence row counter must equal total bookings
+        Optional<TempleReceiptSequence> sequenceOpt =
+                templeReceiptSequenceRepository.findByTempleIdAndFinancialYear(
+                        temple.getId(), currentFy);
+        assertThat(sequenceOpt).isPresent();
+        assertThat(sequenceOpt.get().getLastSequenceNumber()).isEqualTo((long) numberOfThreads);
+    }
+
+    @Test
+    @DisplayName(
+            "P5: Transaction rollback does not consume a sequence number (counter is restored)")
+    void transactionRollback_ShouldRestoreSequenceCounter() {
+        String currentFy = receiptNumberService.calculateFinancialYear(LocalDate.now());
+
+        // 1. Initial valid booking -> gets sequence 1 (000001)
+        DarshanBookingResponseDto booking1 =
+                darshanBookingService.createBooking(
+                        DarshanBookingRequestDto.builder()
+                                .darshanSlotId(darshanSlot.getId())
+                                .devoteeName("Devotee One")
+                                .phoneNumber("9876543210")
+                                .ticketCount(2)
+                                .build());
+        assertThat(booking1.getReceiptNumber()).endsWith("/000001");
+
+        // Verify sequence counter in database is 1
+        TempleReceiptSequence sequenceBeforeFail =
+                templeReceiptSequenceRepository
+                        .findByTempleIdAndFinancialYear(temple.getId(), currentFy)
+                        .orElseThrow();
+        assertThat(sequenceBeforeFail.getLastSequenceNumber()).isEqualTo(1L);
+
+        // 2. Attempt booking that exceeds capacity (remaining = 8, requesting = 15) -> throws
+        // InsufficientCapacityException
+        assertThatThrownBy(
+                        () ->
+                                darshanBookingService.createBooking(
+                                        DarshanBookingRequestDto.builder()
+                                                .darshanSlotId(darshanSlot.getId())
+                                                .devoteeName("Devotee Overbook")
+                                                .phoneNumber("9876543210")
+                                                .ticketCount(15)
+                                                .build()))
+                .isInstanceOf(InsufficientCapacityException.class);
+
+        // Verify sequence counter was rolled back and is STILL 1
+        TempleReceiptSequence sequenceAfterFail =
+                templeReceiptSequenceRepository
+                        .findByTempleIdAndFinancialYear(temple.getId(), currentFy)
+                        .orElseThrow();
+        assertThat(sequenceAfterFail.getLastSequenceNumber()).isEqualTo(1L);
+
+        // 3. Next successful booking receives sequence 2 (000002), proving sequence 2 was not
+        // skipped
+        DarshanBookingResponseDto booking2 =
+                darshanBookingService.createBooking(
+                        DarshanBookingRequestDto.builder()
+                                .darshanSlotId(darshanSlot.getId())
+                                .devoteeName("Devotee Two")
+                                .phoneNumber("9876543210")
+                                .ticketCount(2)
+                                .build());
+        assertThat(booking2.getReceiptNumber()).endsWith("/000002");
+
+        TempleReceiptSequence sequenceFinal =
+                templeReceiptSequenceRepository
+                        .findByTempleIdAndFinancialYear(temple.getId(), currentFy)
+                        .orElseThrow();
+        assertThat(sequenceFinal.getLastSequenceNumber()).isEqualTo(2L);
+    }
+
+    @Test
+    @DisplayName(
+            "P5: Cancelled bookings retain their receipt numbers and subsequent bookings do not"
+                    + " reuse them")
+    void cancelledBooking_ShouldRetainReceiptNumber_AndNeverReuse() {
+        // 1. Create booking -> gets sequence 1
+        DarshanBookingResponseDto booking1 =
+                darshanBookingService.createBooking(
+                        DarshanBookingRequestDto.builder()
+                                .darshanSlotId(darshanSlot.getId())
+                                .devoteeName("Devotee ToCancel")
+                                .phoneNumber("9876543210")
+                                .ticketCount(2)
+                                .build());
+        String receipt1 = booking1.getReceiptNumber();
+        assertThat(receipt1).endsWith("/000001");
+
+        // 2. Cancel booking
+        DarshanBookingResponseDto cancelled =
+                darshanBookingService.cancelBooking(booking1.getBookingId());
+        assertThat(cancelled.getBookingStatus()).isEqualTo("CANCELLED");
+        assertThat(cancelled.getReceiptNumber()).isEqualTo(receipt1);
+
+        // Verify in repository that cancelled entity retains the receipt number
+        DarshanBooking persistedCancelled =
+                darshanBookingRepository.findById(booking1.getBookingId()).orElseThrow();
+        assertThat(persistedCancelled.getReceiptNumber()).isEqualTo(receipt1);
+        assertThat(persistedCancelled.getBookingStatus()).isEqualTo(BookingStatus.CANCELLED);
+
+        // 3. Create another booking -> gets sequence 2 (000002), never reusing 000001
+        DarshanBookingResponseDto booking2 =
+                darshanBookingService.createBooking(
+                        DarshanBookingRequestDto.builder()
+                                .darshanSlotId(darshanSlot.getId())
+                                .devoteeName("Devotee Next")
+                                .phoneNumber("9876543210")
+                                .ticketCount(2)
+                                .build());
+        String receipt2 = booking2.getReceiptNumber();
+        assertThat(receipt2).endsWith("/000002");
+        assertThat(receipt2).isNotEqualTo(receipt1);
     }
 }

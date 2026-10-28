@@ -45,6 +45,7 @@ public class DarshanBookingMapper {
                 .bookingId(booking.getId())
                 .darshanSlotId(
                         booking.getDarshanSlot() != null ? booking.getDarshanSlot().getId() : null)
+                .receiptNumber(booking.getReceiptNumber())
                 .devoteeName(booking.getDevoteeName())
                 .phoneNumber(booking.getPhoneNumber())
                 .ticketCount(booking.getTicketCount())
