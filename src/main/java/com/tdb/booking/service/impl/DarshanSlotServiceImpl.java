@@ -21,6 +21,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+/**
+ * Implementation of {@link DarshanSlotService}. Handles slot validation, uniqueness checks, and
+ * database persistence.
+ */
 @Service
 @RequiredArgsConstructor
 public class DarshanSlotServiceImpl implements DarshanSlotService {
@@ -32,6 +36,12 @@ public class DarshanSlotServiceImpl implements DarshanSlotService {
     private final DarshanSlotRepository darshanSlotRepository;
     private final DarshanSlotMapper darshanSlotMapper;
 
+    /**
+     * Creates a new darshan slot after verifying temple, slot master, and date constraints.
+     *
+     * @param requestDto slot creation payload
+     * @return {@link DarshanSlotResponseDto} with slot details and calculated available tickets
+     */
     @Override
     @Transactional
     public DarshanSlotResponseDto createDarshanSlot(DarshanSlotRequestDto requestDto) {
@@ -41,7 +51,7 @@ public class DarshanSlotServiceImpl implements DarshanSlotService {
                 requestDto.getSlotMasterId(),
                 requestDto.getSlotDate());
 
-        // 1. Verify temple exists and is active
+        // Step 1: Verify temple exists and is active
         TempleMaster temple =
                 templeMasterRepository
                         .findById(requestDto.getTempleId())
@@ -49,12 +59,11 @@ public class DarshanSlotServiceImpl implements DarshanSlotService {
                                 () ->
                                         ResourceNotFoundException.templeNotFound(
                                                 requestDto.getTempleId()));
-
         if (!Boolean.TRUE.equals(temple.getIsActive())) {
             throw SlotInactiveException.templeInactive(requestDto.getTempleId());
         }
 
-        // 2. Verify slot master exists and is active
+        // Step 2: Verify slot master exists and is active
         SlotMaster slotMaster =
                 slotMasterRepository
                         .findById(requestDto.getSlotMasterId())
@@ -62,18 +71,17 @@ public class DarshanSlotServiceImpl implements DarshanSlotService {
                                 () ->
                                         ResourceNotFoundException.slotMasterNotFound(
                                                 requestDto.getSlotMasterId()));
-
         if (!Boolean.TRUE.equals(slotMaster.getIsActive())) {
             throw SlotInactiveException.slotMasterInactive(requestDto.getSlotMasterId());
         }
 
-        // 3. Verify slot master belongs to the specified temple
+        // Step 3: Verify slot master belongs to the specified temple
         if (!slotMaster.getTemple().getId().equals(temple.getId())) {
             throw new InvalidRequestException(
                     "Slot master does not belong to the specified temple");
         }
 
-        // 4. Check for duplicate slot for same slot master and date
+        // Step 4: Check that a slot for the same slot master and date does not already exist
         if (darshanSlotRepository.existsBySlotMasterIdAndSlotDate(
                 slotMaster.getId(), requestDto.getSlotDate())) {
             throw DuplicateResourceException.duplicateSlot(
@@ -83,7 +91,7 @@ public class DarshanSlotServiceImpl implements DarshanSlotService {
                             + requestDto.getSlotDate());
         }
 
-        // 5. Create and persist slot
+        // Step 5: Create darshan_slot record with booked_count = 0
         DarshanSlot darshanSlot =
                 DarshanSlot.builder()
                         .temple(temple)
@@ -99,9 +107,16 @@ public class DarshanSlotServiceImpl implements DarshanSlotService {
         DarshanSlot savedSlot = darshanSlotRepository.save(darshanSlot);
         log.info("Successfully created darshan slot with id: {}", savedSlot.getId());
 
+        // Step 6: Return the created slot details including available ticket count
         return darshanSlotMapper.toResponseDto(savedSlot);
     }
 
+    /**
+     * Retrieves an existing darshan slot by ID along with current availability.
+     *
+     * @param slotId UUID of the darshan slot
+     * @return {@link DarshanSlotResponseDto}
+     */
     @Override
     @Transactional(readOnly = true)
     public DarshanSlotResponseDto getDarshanSlotById(UUID slotId) {

@@ -18,6 +18,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+/**
+ * Implementation of {@link DarshanBookingService}. Executes ticket reservations using pessimistic
+ * database locking to guarantee atomic capacity verification and concurrency safety.
+ */
 @Service
 @RequiredArgsConstructor
 public class DarshanBookingServiceImpl implements DarshanBookingService {
@@ -28,6 +32,17 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
     private final DarshanBookingRepository darshanBookingRepository;
     private final DarshanBookingMapper darshanBookingMapper;
 
+    /**
+     * Confirms ticket reservation for a darshan slot.
+     *
+     * <p>Concurrency Strategy: Reads the slot row with {@code PESSIMISTIC_WRITE} database locking
+     * (SELECT ... FOR UPDATE). This prevents simultaneous transactions from concurrently reading
+     * stale capacity and overbooking. Both the booking creation and the slot booked_count update
+     * are committed atomically.
+     *
+     * @param requestDto booking request details
+     * @return confirmed {@link DarshanBookingResponseDto}
+     */
     @Override
     @Transactional
     public DarshanBookingResponseDto createBooking(DarshanBookingRequestDto requestDto) {
@@ -37,7 +52,7 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
                 requestDto.getDevoteeName(),
                 requestDto.getTicketCount());
 
-        // 1. Retrieve the darshan slot with a pessimistic lock to ensure thread safety
+        // Step 1: Retrieve the darshan slot with a pessimistic write lock (SELECT FOR UPDATE)
         DarshanSlot slot =
                 darshanSlotRepository
                         .findByIdWithLock(requestDto.getDarshanSlotId())
@@ -46,12 +61,12 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
                                         ResourceNotFoundException.slotNotFound(
                                                 requestDto.getDarshanSlotId()));
 
-        // 2. Verify the slot is active
+        // Step 2: Verify that the slot exists and is active
         if (!Boolean.TRUE.equals(slot.getIsActive())) {
             throw SlotInactiveException.slotInactive(slot.getId());
         }
 
-        // 3. Check capacity availability
+        // Step 3: Check that available tickets are sufficient
         int availableTickets = slot.getAvailableCount();
         if (requestDto.getTicketCount() > availableTickets) {
             log.warn(
@@ -65,7 +80,7 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
                             requestDto.getTicketCount(), availableTickets));
         }
 
-        // 4. Create and persist booking record
+        // Step 4: Create the booking record
         DarshanBooking booking =
                 DarshanBooking.builder()
                         .darshanSlot(slot)
@@ -77,7 +92,7 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
 
         DarshanBooking savedBooking = darshanBookingRepository.save(booking);
 
-        // 5. Increment booked count and persist slot update
+        // Step 5: Increment darshan_slot.booked_count by the requested ticket count
         slot.setBookedCount(slot.getBookedCount() + requestDto.getTicketCount());
         darshanSlotRepository.save(slot);
 
@@ -86,9 +101,16 @@ public class DarshanBookingServiceImpl implements DarshanBookingService {
                 savedBooking.getId(),
                 slot.getBookedCount());
 
+        // Step 6: Return the confirmed booking response
         return darshanBookingMapper.toResponseDto(savedBooking, "CONFIRMED");
     }
 
+    /**
+     * Retrieves an existing booking reservation by its UUID reference.
+     *
+     * @param bookingId unique booking reference
+     * @return {@link DarshanBookingResponseDto}
+     */
     @Override
     @Transactional(readOnly = true)
     public DarshanBookingResponseDto getBookingById(UUID bookingId) {
