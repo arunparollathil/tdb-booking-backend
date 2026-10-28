@@ -43,6 +43,7 @@ public class DarshanBookingMapper {
 
         return DarshanBookingResponseDto.builder()
                 .bookingId(booking.getId())
+                .idempotencyKey(booking.getIdempotencyKey())
                 .darshanSlotId(
                         booking.getDarshanSlot() != null ? booking.getDarshanSlot().getId() : null)
                 .receiptNumber(booking.getReceiptNumber())

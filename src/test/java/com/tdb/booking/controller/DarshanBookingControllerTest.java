@@ -490,6 +490,7 @@ class DarshanBookingControllerTest {
                 darshanBookingRepository.save(
                         DarshanBooking.builder()
                                 .darshanSlot(pastSlot)
+                                .idempotencyKey(UUID.randomUUID())
                                 .receiptNumber("TIR_001/2026-27/000999")
                                 .devoteeName("Devotee Past")
                                 .phoneNumber("9876543210")
@@ -532,5 +533,126 @@ class DarshanBookingControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.errorCode", is("INVALID_REQUEST")))
                 .andExpect(jsonPath("$.status", is(400)));
+    }
+
+    @Test
+    @DisplayName("P3: Booking with idempotency key succeeds and retrying returns identical booking")
+    void bookTickets_WithIdempotencyKey_SafeRetry_Success() throws Exception {
+        UUID idempotencyKey = UUID.randomUUID();
+        DarshanBookingRequestDto request =
+                DarshanBookingRequestDto.builder()
+                        .idempotencyKey(idempotencyKey)
+                        .darshanSlotId(activeSlot.getId())
+                        .devoteeName("Devotee Retry")
+                        .phoneNumber("9876543210")
+                        .ticketCount(2)
+                        .build();
+
+        // 1. First attempt creates the booking
+        String response1Json =
+                mockMvc.perform(
+                                post("/api/v1/darshan-bookings")
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content(objectMapper.writeValueAsString(request)))
+                        .andExpect(status().isCreated())
+                        .andExpect(jsonPath("$.idempotencyKey", is(idempotencyKey.toString())))
+                        .andExpect(jsonPath("$.bookingId", notNullValue()))
+                        .andExpect(jsonPath("$.receiptNumber", notNullValue()))
+                        .andReturn()
+                        .getResponse()
+                        .getContentAsString();
+
+        String bookingId1 = objectMapper.readTree(response1Json).get("bookingId").asText();
+        String receipt1 = objectMapper.readTree(response1Json).get("receiptNumber").asText();
+
+        DarshanSlot slotAfterFirst =
+                darshanSlotRepository.findById(activeSlot.getId()).orElseThrow();
+        assertThat(slotAfterFirst.getBookedCount()).isEqualTo(2);
+
+        // 2. Retry with the EXACT same idempotency key and details -> returns existing booking
+        String response2Json =
+                mockMvc.perform(
+                                post("/api/v1/darshan-bookings")
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content(objectMapper.writeValueAsString(request)))
+                        .andExpect(status().isCreated())
+                        .andExpect(jsonPath("$.idempotencyKey", is(idempotencyKey.toString())))
+                        .andExpect(jsonPath("$.bookingId", is(bookingId1)))
+                        .andExpect(jsonPath("$.receiptNumber", is(receipt1)))
+                        .andReturn()
+                        .getResponse()
+                        .getContentAsString();
+
+        // Verify capacity was NOT decremented again (remains 2 booked, 8 available)
+        DarshanSlot slotAfterRetry =
+                darshanSlotRepository.findById(activeSlot.getId()).orElseThrow();
+        assertThat(slotAfterRetry.getBookedCount()).isEqualTo(2);
+        assertThat(slotAfterRetry.getAvailableCount()).isEqualTo(8);
+
+        // Only 1 booking record exists in repository
+        assertThat(darshanBookingRepository.findByIdempotencyKey(idempotencyKey)).isPresent();
+        assertThat(darshanBookingRepository.findByDarshanSlotId(activeSlot.getId())).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("P3: Reusing idempotency key with different booking details returns 409 Conflict")
+    void bookTickets_ReusedKey_WithDifferentDetails_Returns409() throws Exception {
+        UUID idempotencyKey = UUID.randomUUID();
+        DarshanBookingRequestDto initialRequest =
+                DarshanBookingRequestDto.builder()
+                        .idempotencyKey(idempotencyKey)
+                        .darshanSlotId(activeSlot.getId())
+                        .devoteeName("Original Devotee")
+                        .phoneNumber("9876543210")
+                        .ticketCount(2)
+                        .build();
+
+        // 1. Initial booking succeeds
+        mockMvc.perform(
+                        post("/api/v1/darshan-bookings")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(objectMapper.writeValueAsString(initialRequest)))
+                .andExpect(status().isCreated());
+
+        // 2. Reuse key with different ticket count (3 instead of 2) -> 409 Conflict
+        DarshanBookingRequestDto differentTicketsRequest =
+                DarshanBookingRequestDto.builder()
+                        .idempotencyKey(idempotencyKey)
+                        .darshanSlotId(activeSlot.getId())
+                        .devoteeName("Original Devotee")
+                        .phoneNumber("9876543210")
+                        .ticketCount(3)
+                        .build();
+
+        mockMvc.perform(
+                        post("/api/v1/darshan-bookings")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(objectMapper.writeValueAsString(differentTicketsRequest)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.errorCode", is("IDEMPOTENCY_CONFLICT")))
+                .andExpect(jsonPath("$.status", is(409)));
+
+        // 3. Reuse key with different devotee name -> 409 Conflict
+        DarshanBookingRequestDto differentDevoteeRequest =
+                DarshanBookingRequestDto.builder()
+                        .idempotencyKey(idempotencyKey)
+                        .darshanSlotId(activeSlot.getId())
+                        .devoteeName("Different Devotee")
+                        .phoneNumber("9876543210")
+                        .ticketCount(2)
+                        .build();
+
+        mockMvc.perform(
+                        post("/api/v1/darshan-bookings")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(objectMapper.writeValueAsString(differentDevoteeRequest)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.errorCode", is("IDEMPOTENCY_CONFLICT")))
+                .andExpect(jsonPath("$.status", is(409)));
+
+        // Verify slot bookedCount was never altered by conflicting requests
+        DarshanSlot unalteredSlot =
+                darshanSlotRepository.findById(activeSlot.getId()).orElseThrow();
+        assertThat(unalteredSlot.getBookedCount()).isEqualTo(2);
     }
 }

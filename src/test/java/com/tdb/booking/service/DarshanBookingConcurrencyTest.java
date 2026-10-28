@@ -526,4 +526,72 @@ class DarshanBookingConcurrencyTest {
         assertThat(receipt2).endsWith("/000002");
         assertThat(receipt2).isNotEqualTo(receipt1);
     }
+
+    @Test
+    @DisplayName(
+            "P3: Concurrent duplicate bookings with identical idempotency key -> exactly 1 booking"
+                + " created, tickets reserved once, all threads receive identical booking response")
+    void concurrentDuplicateBookings_ShouldCreateOnlyOneBooking() throws InterruptedException {
+        int numberOfThreads = 10;
+        UUID sharedIdempotencyKey = UUID.randomUUID();
+        ExecutorService executorService = Executors.newFixedThreadPool(numberOfThreads);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch endLatch = new CountDownLatch(numberOfThreads);
+        java.util.List<DarshanBookingResponseDto> responses =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        AtomicInteger failureCount = new AtomicInteger(0);
+
+        for (int i = 0; i < numberOfThreads; i++) {
+            executorService.submit(
+                    () -> {
+                        try {
+                            startLatch.await();
+                            DarshanBookingResponseDto response =
+                                    darshanBookingService.createBooking(
+                                            DarshanBookingRequestDto.builder()
+                                                    .idempotencyKey(sharedIdempotencyKey)
+                                                    .darshanSlotId(darshanSlot.getId())
+                                                    .devoteeName("Concurrent Devotee")
+                                                    .phoneNumber("9876543210")
+                                                    .ticketCount(2)
+                                                    .build());
+                            responses.add(response);
+                        } catch (Exception e) {
+                            failureCount.incrementAndGet();
+                        } finally {
+                            endLatch.countDown();
+                        }
+                    });
+        }
+
+        startLatch.countDown();
+        endLatch.await();
+        executorService.shutdown();
+
+        // Zero unexpected failures; all concurrent requests either succeeded originally or safely
+        // recovered
+        assertThat(failureCount.get()).isEqualTo(0);
+        assertThat(responses).hasSize(numberOfThreads);
+
+        // Every thread received the EXACT SAME booking ID and receipt number
+        UUID firstBookingId = responses.get(0).getBookingId();
+        String firstReceipt = responses.get(0).getReceiptNumber();
+        assertThat(firstBookingId).isNotNull();
+        assertThat(firstReceipt).isNotNull();
+
+        for (DarshanBookingResponseDto resp : responses) {
+            assertThat(resp.getBookingId()).isEqualTo(firstBookingId);
+            assertThat(resp.getReceiptNumber()).isEqualTo(firstReceipt);
+            assertThat(resp.getIdempotencyKey()).isEqualTo(sharedIdempotencyKey);
+        }
+
+        // Database checks: exactly 1 booking record persisted for this idempotency key
+        assertThat(darshanBookingRepository.findByIdempotencyKey(sharedIdempotencyKey)).isPresent();
+        assertThat(darshanBookingRepository.findByDarshanSlotId(darshanSlot.getId())).hasSize(1);
+
+        // Capacity was incremented by 2 tickets only ONCE (capacity 10 - 2 = 8 available)
+        DarshanSlot updatedSlot = darshanSlotRepository.findById(darshanSlot.getId()).orElseThrow();
+        assertThat(updatedSlot.getBookedCount()).isEqualTo(2);
+        assertThat(updatedSlot.getAvailableCount()).isEqualTo(8);
+    }
 }
