@@ -12,7 +12,8 @@ import org.springframework.stereotype.Component;
 public class DarshanBookingMapper {
 
     /**
-     * Converts a {@link DarshanBooking} entity to a {@link DarshanBookingResponseDto}.
+     * Converts a {@link DarshanBooking} entity to a {@link DarshanBookingResponseDto}. Populates
+     * the status from the entity's {@code bookingStatus} field.
      *
      * @param booking the persisted booking entity
      * @return populated {@link DarshanBookingResponseDto}, or null if input is null
@@ -22,16 +23,23 @@ public class DarshanBookingMapper {
     }
 
     /**
-     * Converts a {@link DarshanBooking} entity with an optional booking status.
+     * Converts a {@link DarshanBooking} entity with an optional override for booking status.
      *
      * @param booking the persisted booking entity
-     * @param bookingStatus confirmation status string (e.g. "CONFIRMED")
+     * @param bookingStatus confirmation status string override (e.g. "CONFIRMED", "CANCELLED")
      * @return populated {@link DarshanBookingResponseDto}, or null if input is null
      */
     public DarshanBookingResponseDto toResponseDto(DarshanBooking booking, String bookingStatus) {
         if (booking == null) {
             return null;
         }
+
+        String resolvedStatus =
+                bookingStatus != null
+                        ? bookingStatus
+                        : (booking.getBookingStatus() != null
+                                ? booking.getBookingStatus().name()
+                                : "CONFIRMED");
 
         return DarshanBookingResponseDto.builder()
                 .bookingId(booking.getId())
@@ -40,7 +48,7 @@ public class DarshanBookingMapper {
                 .devoteeName(booking.getDevoteeName())
                 .phoneNumber(booking.getPhoneNumber())
                 .ticketCount(booking.getTicketCount())
-                .bookingStatus(bookingStatus)
+                .bookingStatus(resolvedStatus)
                 .createdAt(booking.getCreatedAt())
                 .build();
     }

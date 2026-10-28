@@ -4,7 +4,7 @@ import com.tdb.booking.dto.DarshanBookingRequestDto;
 import com.tdb.booking.dto.DarshanBookingResponseDto;
 import java.util.UUID;
 
-/** Service interface for managing darshan ticket reservations and confirmations. */
+/** Service interface for managing darshan ticket reservations and cancellations. */
 public interface DarshanBookingService {
 
     /**
@@ -22,4 +22,13 @@ public interface DarshanBookingService {
      * @return {@link DarshanBookingResponseDto}
      */
     DarshanBookingResponseDto getBookingById(UUID bookingId);
+
+    /**
+     * Cancels an existing confirmed booking and releases reserved tickets back to the slot.
+     * Executed under a pessimistic write lock on the slot. Idempotent if already cancelled.
+     *
+     * @param bookingId unique identifier of the booking to cancel
+     * @return updated {@link DarshanBookingResponseDto} with CANCELLED status
+     */
+    DarshanBookingResponseDto cancelBooking(UUID bookingId);
 }
